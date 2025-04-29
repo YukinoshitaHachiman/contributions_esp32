@@ -9,10 +9,18 @@
 #define MAX_RESPONSE_SIZE 32768
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
+#define DATE_STR_LEN 11 // "YYYY-MM-DD" + '\0'
+
+
 static char response_buffer[MAX_RESPONSE_SIZE];
 static int response_len = 0;
 
 int contributions_last_7_days[CONTRIBUTION_DAYS] = {0}; // 最近7天提交数
+char contribution_dates[CONTRIBUTION_DAYS][DATE_STR_LEN] = {0};
+
+int monthly_contributions[MAX_MONTHLY_DAYS] = {0};
+char monthly_dates[MAX_MONTHLY_DAYS][11] = {0};
+static int current_month_count = 0;  // 当月数据计数
 
 static const char *graphql_template =
     "{"
@@ -33,6 +41,7 @@ static const char *graphql_template =
     "}\""
     "}";
 
+
 static esp_err_t _http_event_handler(esp_http_client_event_t *evt) {
     if (evt->event_id == HTTP_EVENT_ON_DATA && !esp_http_client_is_chunked_response(evt->client)) {
         int copy_len = MIN(evt->data_len, MAX_RESPONSE_SIZE - response_len - 1);
@@ -43,61 +52,31 @@ static esp_err_t _http_event_handler(esp_http_client_event_t *evt) {
     return ESP_OK;
 }
 
-// static void parse_contributions(const char *json) {
-//     cJSON *root = cJSON_Parse(json);
-//     if (!root) {
-//         ESP_LOGE(TAG, "JSON解析失败");
-//         return;
-//     }
 
-//     cJSON *errors = cJSON_GetObjectItem(root, "errors");
-//     if (errors) {
-//         cJSON *message = cJSON_GetObjectItem(cJSON_GetArrayItem(errors, 0), "message");
-//         if (message && message->valuestring) {
-//             ESP_LOGE(TAG, "GraphQL错误: %s", message->valuestring);
-//         }
-//         cJSON_Delete(root);
-//         return;
-//     }
 
-//     cJSON *weeks = cJSON_GetObjectItemCaseSensitive(
-//         cJSON_GetObjectItemCaseSensitive(
-//             cJSON_GetObjectItemCaseSensitive(
-//                 cJSON_GetObjectItemCaseSensitive(
-//                     cJSON_GetObjectItemCaseSensitive(root, "data"), "user"), "contributionsCollection"), "contributionCalendar"), "weeks");
-
-//     if (!weeks) {
-//         ESP_LOGE(TAG, "没有weeks数据");
-//         cJSON_Delete(root);
-//         return;
-//     }
-
-//     int total_days = 0;
-//     for (int w = cJSON_GetArraySize(weeks) - 1; w >= 0 && total_days < CONTRIBUTION_DAYS; w--) {
-//         cJSON *week = cJSON_GetArrayItem(weeks, w);
-//         cJSON *days = cJSON_GetObjectItem(week, "contributionDays");
-//         for (int d = cJSON_GetArraySize(days) - 1; d >= 0 && total_days < CONTRIBUTION_DAYS; d--) {
-//             cJSON *day = cJSON_GetArrayItem(days, d);
-//             cJSON *count = cJSON_GetObjectItem(day, "contributionCount");
-//             if (count) {
-//                 contributions_last_7_days[CONTRIBUTION_DAYS - 1 - total_days] = count->valueint;
-//                 total_days++;
-//             }
-//         }
-//     }
-//     cJSON_Delete(root);
-// }
 
 
 static void parse_contributions(const char *json) {
-    ESP_LOGI(TAG, "Received JSON: %s", json); // 可注释掉，太长了的话
+    //ESP_LOGI(TAG, "Received JSON: %s", json);
     cJSON *root = cJSON_Parse(json);
     if (!root) {
         ESP_LOGE(TAG, "Failed to parse JSON");
         return;
     }
-    
-    memset(contributions_last_7_days, 0, sizeof(contributions_last_7_days)); // 清零
+
+    cJSON *errors = cJSON_GetObjectItem(root, "errors");
+    if (errors) {
+        int error_count = cJSON_GetArraySize(errors);
+        for (int i = 0; i < error_count; i++) {
+            cJSON *error = cJSON_GetArrayItem(errors, i);
+            cJSON *message = cJSON_GetObjectItem(error, "message");
+            if (message && message->valuestring) {
+                ESP_LOGE(TAG, "GraphQL Error: %s", message->valuestring);
+            }
+        }
+        cJSON_Delete(root);
+        return;
+    }
 
     cJSON *data = cJSON_GetObjectItem(root, "data");
     cJSON *user = cJSON_GetObjectItem(data, "user");
@@ -111,41 +90,65 @@ static void parse_contributions(const char *json) {
         return;
     }
 
-    // 获取当前时间
-    time_t now = time(NULL);
-    struct tm *tm_now = localtime(&now);
-    int today_weekday = tm_now->tm_wday; // 0=Sunday, 1=Monday, ..., 6=Saturday
-
-    // 计算本周周一的时间戳（0点）
-    time_t monday = now - ((today_weekday == 0 ? 6 : today_weekday - 1) * 24 * 3600);
-    struct tm tm_monday = *localtime(&monday);
-    tm_monday.tm_hour = 0;
-    tm_monday.tm_min = 0;
-    tm_monday.tm_sec = 0;
-    monday = mktime(&tm_monday);
-
+    int total_days = 0;
     int week_count = cJSON_GetArraySize(weeks);
-    for (int w = 0; w < week_count; w++) {
+
+    for (int w = week_count - 1; w >= 0 && total_days < CONTRIBUTION_DAYS; w--) {
         cJSON *week = cJSON_GetArrayItem(weeks, w);
         cJSON *days = cJSON_GetObjectItem(week, "contributionDays");
-        int day_count = cJSON_GetArraySize(days);
 
-        for (int d = 0; d < day_count; d++) {
+        int day_count = cJSON_GetArraySize(days);
+        for (int d = day_count - 1; d >= 0 && total_days < CONTRIBUTION_DAYS; d--) {
             cJSON *day = cJSON_GetArrayItem(days, d);
             cJSON *count = cJSON_GetObjectItem(day, "contributionCount");
             cJSON *date = cJSON_GetObjectItem(day, "date");
 
-            if (count && date && date->valuestring) {
-                // 解析日期字符串
-                struct tm tm_day = {0};
-                strptime(date->valuestring, "%Y-%m-%d", &tm_day);
-                time_t day_time = mktime(&tm_day);
+            if (count && date) {
+                contributions_last_7_days[CONTRIBUTION_DAYS - 1 - total_days] = count->valueint;
+                snprintf(contribution_dates[CONTRIBUTION_DAYS - 1 - total_days], 11, "%s", date->valuestring);
+                total_days++;
+            }
+        }
+    }
 
-                // 如果在本周范围内
-                double diff_days = difftime(day_time, monday) / (24 * 3600);
-                if (diff_days >= 0 && diff_days < 7) {
-                    contributions_last_7_days[(int)diff_days] = count->valueint;
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    int current_month = timeinfo.tm_mon + 1;
+    
+    current_month_count = 0;  // 重置计数器
+    
+    for (int w = 0; w < week_count; w++) {
+        cJSON *week = cJSON_GetArrayItem(weeks, w);
+        cJSON *days = cJSON_GetObjectItem(week, "contributionDays");
+        
+        int day_count = cJSON_GetArraySize(days);
+        for (int d = 0; d < day_count; d++) {
+            cJSON *day = cJSON_GetArrayItem(days, d);
+            cJSON *count = cJSON_GetObjectItem(day, "contributionCount");
+            cJSON *date = cJSON_GetObjectItem(day, "date");
+            
+            if (count && date) {
+                // int year, month, day;
+                // sscanf(date->valuestring, "%d-%d-%d", &year, &month, &day);
+                
+                // // 只保存当月的数据
+                // if (month == current_month) {
+                //     monthly_contributions[day-1] = count->valueint;  // 数组索引从0开始
+                //     strncpy(monthly_dates[day-1], date->valuestring, 11);
+                //     current_month_count++;
+                // }
+
+                int year, month, mday;
+                sscanf(date->valuestring, "%d-%d-%d", &year, &month, &mday);
+                
+                if (year == timeinfo.tm_year + 1900 && month == current_month) {
+                    monthly_contributions[mday - 1] = count->valueint;
+                    strncpy(monthly_dates[mday - 1], date->valuestring, DATE_STR_LEN);
+                    current_month_count++;
                 }
+                    
             }
         }
     }
@@ -153,7 +156,12 @@ static void parse_contributions(const char *json) {
     cJSON_Delete(root);
 }
 
+
+
 void github_contributions_query(void) {
+
+
+
     char graphql_query[512];
     snprintf(graphql_query, sizeof(graphql_query), graphql_template, GITHUB_USERNAME);
 

@@ -6,5 +6,8 @@
     },
     "idf.openOcdConfigs": [
         "board/esp32s3-bridge.cfg"
-    ]
+    ],
+    "files.associations": {
+        "github_contributions.h": "c"
+    }
 }
