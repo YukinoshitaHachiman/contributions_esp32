@@ -169,7 +169,7 @@ void github_contributions_query(void) {
         .url = GITHUB_API_URL,
         .method = HTTP_METHOD_POST,
         .transport_type = HTTP_TRANSPORT_OVER_SSL,
-        .cert_pem = NULL,  // 简化：禁用证书验证
+        .cert_pem = NULL,  //禁用证书验证
         .skip_cert_common_name_check = true,
         .event_handler = _http_event_handler,
     };

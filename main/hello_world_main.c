@@ -68,10 +68,10 @@ void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(1000));
 
-    // 1. 启动 SNTP 同步
+   
     initialize_sntp();
 
-    // 2. 等待时间同步（这里等待到大于 2018-05-01）
+    
     time_t now = 0;
     struct tm timeinfo = { 0 };
     while (now < 1525132800) {
